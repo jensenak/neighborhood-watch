@@ -1,8 +1,9 @@
 import mechanicalsoup
 import psycopg2
-from time import sleep
-from datetime import datetime, timedelta
-from bottle import route, post, run, template, request
+import psycopg2.extras
+import json
+from time import sleep, time
+from bottle import route, post, delete, run, request
 
 conn = psycopg2.connect("dbname='hood' user='neighbor' host='localhost' password='french fries'")
 
@@ -11,26 +12,35 @@ conn = psycopg2.connect("dbname='hood' user='neighbor' host='localhost' password
 #===============================================================================
 @route('/houses')
 def list_houses():
-    getHouses()
+    return getHouses()
 
 @route('/house/<house>')
 def get_house(house):
-    getHouse(house)
+    return getHouse(house)
 
 @post('/house/new')
 def new_house():
     return addHouse(request.json['address'])
 
+@delete('/house/<house>')
+def del_house(house):
+    removeHouse(house)
+
 #===============================================================================
 # DATABASE FUNCTIONS
 #===============================================================================
 def getHouses():
-    cur = conn.cursor()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
     cur.execute("""SELECT DISTINCT ON (houses.id) *
                      FROM houses INNER JOIN history
                      ON history.house = houses.id
-                     ORDER BY houses.id, history.last DESC""")
-    return cur.fetchall()
+                     ORDER BY houses.id, history.timestamp DESC""")
+    resp = cur.fetchall()
+    result = []
+    for r in resp:
+        result.append(dict(r))
+
+    return {"houses":result}
 
 def getAddrs():
     cur = conn.cursor()
@@ -51,14 +61,27 @@ def getHouse(house):
 def addHouse(addr, photo=1):
     cur = conn.cursor()
     cur.execute("""INSERT INTO houses (addr, photo)
-                   VALUES (%s, %s)""", (addr, photo))
+                   VALUES (%s, %s) RETURNING id""", (addr, photo))
+    conn.commit()
+    return {"house":cur.fetchone()[0]}
 
 def addHistory(house, result, price):
-    now = datetime.utcnow()
+    now = int(time())
     cur = conn.cursor()
-    cur.execute("""INSERT INTO history (last, result, price, house)
-                     VALUES (%s, %s, %s, %s)""", (now, result, price, house))
+    cur.execute("""INSERT INTO history (result, price, house, "timestamp")
+                     VALUES (%s, %s, %s, %s)""", (result, price, house, now))
     conn.commit()
+
+def removeHouse(house):
+    cur = conn.cursor()
+    cur.execute("""DELETE FROM history WHERE house = %s""", (house,))
+    conn.commit()
+    cur.execute("""DELETE FROM houses WHERE id = %s RETURNING photo""", (house,))
+    ph = cur.fetchone()[0]
+    conn.commit()
+    if ph != 1:
+        cur.execute("""DELETE FROM photos WHERE id = %s""", (ph,))
+        conn.commit()
 
 #===============================================================================
 # NOTIFY FUNCTIONS
@@ -71,13 +94,16 @@ def notify():
 #===============================================================================
 @route('/run')
 def runUpdates():
-    print("Initializing...")
     for house, addr in getAddrs():
         sleep(5)
-        print("House {}".format(house))
         status, price = pollZillow(addr)
-        print("--> {} {}".format(status, price))
         addHistory(house, status, price)
+
+@route('/run/<house>')
+def updateOne(house):
+    addr = getHouse(house)['house'][1]
+    status, price = pollZillow(addr)
+    addHistory(house, status, price)
 
 def pollZillow(address):
     browser = mechanicalsoup.Browser()
@@ -91,4 +117,4 @@ def pollZillow(address):
     price = result.soup.select(".main-row > span")[0].string
     return (status, price)
 
-run(host='localhost', port=8080)
+run(host='localhost', port=8585)
